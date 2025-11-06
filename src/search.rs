@@ -2,8 +2,9 @@ use chess::{Board, ChessMove, MoveGen, EMPTY};
 use std::time::Instant;
 
 use crate::evaluation::{evaluate_board_incremental, EvalState};
-use crate::helpers::{order_moves, move_score, mvv_lva_score, capture_exchange_value, HistoryHeuristic, MAX_DEPTH};
+use crate::helpers::{move_score, HistoryHeuristic, MAX_DEPTH};
 use crate::tt::{TranspositionTable, TTFlag};
+use crate::movegen::{IncrementalMoveGen, QuiescenceMoveGen};
 
 const MATE_SCORE: i32 = 100000;
 const INFINITY: i32 = 1000000;
@@ -103,19 +104,9 @@ fn quiescence(board: &Board, eval_state: &EvalState, mut alpha: i32, beta: i32, 
         alpha = stand_pat;
     }
 
-    let mut captures: Vec<ChessMove> = MoveGen::new_legal(board)
-        .filter(|mv| {
-            board.piece_on(mv.get_dest()).is_some() ||
-            (board.piece_on(mv.get_source()) == Some(chess::Piece::Pawn) &&
-             mv.get_source().get_file() != mv.get_dest().get_file() &&
-             board.piece_on(mv.get_dest()).is_none())
-        })
-        .filter(|&mv| capture_exchange_value(board, mv) >= -100)
-        .collect();
-
-    captures.sort_by_key(|&mv| -mvv_lva_score(board, mv));
-
-    for mv in captures {
+    let mut move_gen = QuiescenceMoveGen::new(board);
+    
+    while let Some(mv) = move_gen.next() {
         let new_board = board.make_move_new(mv);
         
         let mut new_eval = *eval_state;
@@ -177,30 +168,14 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
         }
     }
 
-    let mut moves: Vec<ChessMove> = MoveGen::new_legal(board).collect();
-    
-    if moves.is_empty() {
-        if board.checkers() != &EMPTY {
-            return (-MATE_SCORE + ply_from_root as i32, vec![]);
-        }
-        return (0, vec![]);
-    }
-
-    // Move ordering
-    if let Some(tt_mv) = tt_move {
-        if let Some(pos) = moves.iter().position(|&m| m == tt_mv) {
-            moves.remove(pos);
-            moves.insert(0, tt_mv);
-        }
-    } else {
-        order_moves(board, &mut moves, ply_from_root, &state.history, &state.killer_moves);
-    }
+    let mut move_gen = IncrementalMoveGen::new(board, tt_move, ply_from_root, &state.history, &state.killer_moves);
 
     let mut best_score = -INFINITY;
     let mut best_move = None;
     let mut pv = vec![];
+    let mut move_count = 0;
 
-    for (i, &mv) in moves.iter().enumerate() {
+    while let Some(mv) = move_gen.next(board, &state.history) {
         let is_capture = board.piece_on(mv.get_dest()).is_some() ||
                         (board.piece_on(mv.get_source()) == Some(chess::Piece::Pawn) &&
                          mv.get_source().get_file() != mv.get_dest().get_file() &&
@@ -212,16 +187,16 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
         let mut new_eval = *eval_state;
         new_eval.apply_move(board, mv, board.side_to_move());
 
-        let score = if i == 0 {
+        let score = if move_count == 0 {
             let (s, sub_pv) = negamax(&new_board, &new_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state);
             pv = sub_pv;
             -s
         } else {
             // LMR
             let mut reduction = 0;
-            if !in_check && !gives_check && !is_capture && mv.get_promotion().is_none() && i >= 3 && depth >= 3 {
+            if !in_check && !gives_check && !is_capture && mv.get_promotion().is_none() && move_count >= 3 && depth >= 3 {
                 reduction = 1;
-                if i >= 6 && depth >= 5 {
+                if move_count >= 6 && depth >= 5 {
                     reduction = 2;
                 }
                 if reduction > 0 {
@@ -251,6 +226,8 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
             score
         };
 
+        move_count += 1;
+
         if score > best_score {
             best_score = score;
             best_move = Some(mv);
@@ -273,6 +250,14 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
                 }
             }
         }
+    }
+
+    // Check if we had no legal moves
+    if move_count == 0 {
+        if board.checkers() != &EMPTY {
+            return (-MATE_SCORE + ply_from_root as i32, vec![]);
+        }
+        return (0, vec![]);
     }
 
     let flag = if best_score <= alpha_orig {

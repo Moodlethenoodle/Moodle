@@ -1,10 +1,17 @@
-use chess::{Board, Color, Piece, Square, ChessMove};
+use chess::{Board, Color, Piece, Square, ChessMove, BitBoard, File};
 
 pub const PAWN_VALUE: i32 = 100;
 pub const KNIGHT_VALUE: i32 = 300;
 pub const BISHOP_VALUE: i32 = 300;
 pub const ROOK_VALUE: i32 = 500;
 pub const QUEEN_VALUE: i32 = 900;
+
+// Pawn structure penalties/bonuses
+const DOUBLED_PAWN_PENALTY: i32 = 10;
+const ISOLATED_PAWN_PENALTY: i32 = 15;
+const BACKWARD_PAWN_PENALTY: i32 = 8;
+const PASSED_PAWN_BONUS: [i32; 8] = [0, 5, 10, 20, 35, 60, 100, 0]; // by rank
+const CONNECTED_PAWN_BONUS: i32 = 5;
 
 pub const PAWN_PST: [i32; 64] = [
      0,  0,  0,  0,  0,  0,  0,  0,
@@ -100,12 +107,190 @@ pub fn piece_value(piece: Piece) -> i32 {
     }
 }
 
+// Pawn structure cache - stores precomputed pawn evaluations
+#[derive(Clone, Copy, Debug)]
+pub struct PawnStructure {
+    pub score: i32,  // Total pawn structure score (white perspective)
+}
+
+impl PawnStructure {
+    pub fn new() -> Self {
+        Self { score: 0 }
+    }
+
+    // Evaluate pawn structure for both sides
+    pub fn from_board(board: &Board) -> Self {
+        let mut structure = Self::new();
+        
+        let white_pawns = board.pieces(Piece::Pawn) & board.color_combined(Color::White);
+        let black_pawns = board.pieces(Piece::Pawn) & board.color_combined(Color::Black);
+        
+        structure.score += Self::evaluate_pawns(white_pawns, black_pawns, Color::White);
+        structure.score -= Self::evaluate_pawns(black_pawns, white_pawns, Color::Black);
+        
+        structure
+    }
+
+    fn evaluate_pawns(our_pawns: BitBoard, enemy_pawns: BitBoard, color: Color) -> i32 {
+        let mut score = 0;
+        
+        // Build file masks for each file
+        let mut file_masks = [0u8; 8];
+        for sq in our_pawns {
+            file_masks[sq.get_file().to_index()] += 1;
+        }
+        
+        // Evaluate each pawn
+        for sq in our_pawns {
+            let file = sq.get_file().to_index();
+            let rank = sq.get_rank().to_index();
+            let actual_rank = if color == Color::White { rank } else { 7 - rank };
+            
+            // Doubled pawns
+            if file_masks[file] > 1 {
+                score -= DOUBLED_PAWN_PENALTY;
+            }
+            
+            // Isolated pawns (no friendly pawns on adjacent files)
+            let has_neighbor = (file > 0 && file_masks[file - 1] > 0) || 
+                              (file < 7 && file_masks[file + 1] > 0);
+            if !has_neighbor {
+                score -= ISOLATED_PAWN_PENALTY;
+            } else {
+                // Connected pawns (friendly pawn on adjacent file, same or one rank behind)
+                let connected = Self::is_connected(sq, our_pawns, color);
+                if connected {
+                    score += CONNECTED_PAWN_BONUS;
+                }
+            }
+            
+            // Passed pawns (no enemy pawns blocking or attacking)
+            if Self::is_passed(sq, enemy_pawns, color) {
+                score += PASSED_PAWN_BONUS[actual_rank];
+            }
+            
+            // Backward pawns (behind all friendly pawns on adjacent files and can't advance safely)
+            if has_neighbor && Self::is_backward(sq, our_pawns, enemy_pawns, color) {
+                score -= BACKWARD_PAWN_PENALTY;
+            }
+        }
+        
+        score
+    }
+
+    fn is_connected(sq: Square, our_pawns: BitBoard, color: Color) -> bool {
+        let file = sq.get_file().to_index();
+        let rank = sq.get_rank().to_index();
+        
+        for check_sq in our_pawns {
+            let check_file = check_sq.get_file().to_index();
+            let check_rank = check_sq.get_rank().to_index();
+            
+            // Check adjacent files
+            if check_file.abs_diff(file) == 1 {
+                // Same rank or one rank behind
+                if color == Color::White {
+                    if check_rank == rank || check_rank == rank - 1 {
+                        return true;
+                    }
+                } else {
+                    if check_rank == rank || check_rank == rank + 1 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn is_passed(sq: Square, enemy_pawns: BitBoard, color: Color) -> bool {
+        let file = sq.get_file().to_index();
+        let rank = sq.get_rank().to_index();
+        
+        for enemy_sq in enemy_pawns {
+            let enemy_file = enemy_sq.get_file().to_index();
+            let enemy_rank = enemy_sq.get_rank().to_index();
+            
+            // Check if enemy pawn is on same or adjacent file
+            if enemy_file.abs_diff(file) <= 1 {
+                // Check if enemy pawn is ahead
+                if color == Color::White && enemy_rank > rank {
+                    return false;
+                } else if color == Color::Black && enemy_rank < rank {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn is_backward(sq: Square, our_pawns: BitBoard, enemy_pawns: BitBoard, color: Color) -> bool {
+        let file = sq.get_file().to_index();
+        let rank = sq.get_rank().to_index();
+        
+        // Check if this pawn is behind all friendly pawns on adjacent files
+        let mut most_backward_neighbor_rank = if color == Color::White { 0 } else { 7 };
+        let mut has_neighbor = false;
+        
+        for check_sq in our_pawns {
+            let check_file = check_sq.get_file().to_index();
+            let check_rank = check_sq.get_rank().to_index();
+            
+            if check_file.abs_diff(file) == 1 {
+                has_neighbor = true;
+                if color == Color::White {
+                    most_backward_neighbor_rank = most_backward_neighbor_rank.max(check_rank);
+                } else {
+                    most_backward_neighbor_rank = most_backward_neighbor_rank.min(check_rank);
+                }
+            }
+        }
+        
+        if !has_neighbor {
+            return false;
+        }
+        
+        // If behind neighbors, check if advance square is attacked
+        let is_behind = if color == Color::White {
+            rank < most_backward_neighbor_rank
+        } else {
+            rank > most_backward_neighbor_rank
+        };
+        
+        if !is_behind {
+            return false;
+        }
+        
+        // Check if advance square is attacked by enemy pawn
+        let advance_rank = if color == Color::White { rank + 1 } else { rank - 1 };
+        if advance_rank < 0 || advance_rank > 7 {
+            return false;
+        }
+        
+        for enemy_sq in enemy_pawns {
+            let enemy_file = enemy_sq.get_file().to_index();
+            let enemy_rank = enemy_sq.get_rank().to_index();
+            
+            if enemy_file.abs_diff(file) == 1 {
+                if color == Color::White && enemy_rank == advance_rank + 1 {
+                    return true;
+                } else if color == Color::Black && enemy_rank == advance_rank - 1 {
+                    return true;
+                }
+            }
+        }
+        
+        false
+    }
+}
+
 // Incremental evaluation structure
 #[derive(Clone, Copy, Debug)]
 pub struct EvalState {
     pub mg_score: i32,  // Middlegame score
     pub eg_score: i32,  // Endgame score
     pub total_material: i32,  // Total material on board (both sides)
+    pub pawn_structure: PawnStructure,  // Cached pawn structure evaluation
 }
 
 impl EvalState {
@@ -114,6 +299,7 @@ impl EvalState {
             mg_score: 0,
             eg_score: 0,
             total_material: 0,
+            pawn_structure: PawnStructure::new(),
         }
     }
 
@@ -129,6 +315,9 @@ impl EvalState {
                 }
             }
         }
+
+        // Evaluate pawn structure
+        state.pawn_structure = PawnStructure::from_board(board);
 
         // Now evaluate all pieces
         for sq in *board.combined() {
@@ -197,14 +386,20 @@ impl EvalState {
         let from = mv.get_source();
         let to = mv.get_dest();
         let piece = board.piece_on(from).unwrap();
+        
+        let mut pawn_structure_changed = false;
 
         // Handle capture (including en passant)
         if let Some(captured) = board.piece_on(to) {
             self.remove_piece(captured, !moving_color, to);
+            if captured == Piece::Pawn {
+                pawn_structure_changed = true;
+            }
         } else if piece == Piece::Pawn && from.get_file() != to.get_file() {
             // En passant
             let capture_sq = Square::make_square(from.get_rank(), to.get_file());
             self.remove_piece(Piece::Pawn, !moving_color, capture_sq);
+            pawn_structure_changed = true;
         }
 
         // Handle castling - move the rook
@@ -225,11 +420,21 @@ impl EvalState {
         // Move the piece
         self.remove_piece(piece, moving_color, from);
         
+        if piece == Piece::Pawn {
+            pawn_structure_changed = true;
+        }
+        
         // Handle promotion
         if let Some(promotion) = mv.get_promotion() {
             self.add_piece(promotion, moving_color, to);
         } else {
             self.add_piece(piece, moving_color, to);
+        }
+        
+        // Recalculate pawn structure if it changed
+        if pawn_structure_changed {
+            let new_board = board.make_move_new(mv);
+            self.pawn_structure = PawnStructure::from_board(&new_board);
         }
     }
 
@@ -238,13 +443,14 @@ impl EvalState {
         // Endgame when total material < 2000
         let is_endgame = self.total_material < 2000;
         
-        let score = if is_endgame {
+        let mut score = if is_endgame {
             self.eg_score
         } else {
-            // Could do phase interpolation here for smoother transition
-            // For now, just use mg_score
             self.mg_score
         };
+        
+        // Add pawn structure evaluation
+        score += self.pawn_structure.score;
 
         if side_to_move == Color::White {
             score
