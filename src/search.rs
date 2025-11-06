@@ -16,7 +16,11 @@ pub struct SearchState {
     pub null_cutoffs: u64,
     pub lmr_attempts: u64,
     pub pvs_research: u64,
+    pub repetition_avoids: u64,
     pub stop_search: bool,
+    // Track position history for repetition detection
+    pub position_history: Vec<u64>,  // Zobrist hashes from game start
+    pub search_history: [u64; MAX_DEPTH * 2],  // Hashes during current search
 }
 
 impl SearchState {
@@ -29,7 +33,10 @@ impl SearchState {
             null_cutoffs: 0,
             lmr_attempts: 0,
             pvs_research: 0,
+            repetition_avoids: 0,
             stop_search: false,
+            position_history: Vec::new(),
+            search_history: [0; MAX_DEPTH * 2],
         }
     }
 
@@ -38,8 +45,41 @@ impl SearchState {
         self.null_cutoffs = 0;
         self.lmr_attempts = 0;
         self.pvs_research = 0;
+        self.repetition_avoids = 0;
         self.stop_search = false;
         self.killer_moves = [[None; 2]; MAX_DEPTH];
+        self.search_history = [0; MAX_DEPTH * 2];
+    }
+
+    // Check if position is a repetition
+    pub fn is_repetition(&self, hash: u64, ply: usize) -> bool {
+        // Check game history (positions before search started)
+        let count_in_game = self.position_history.iter().filter(|&&h| h == hash).count();
+        
+        // Check search history (only check positions that can repeat - same side to move)
+        // We check every 2 plies (full moves) since same position different side can't repeat
+        let mut count_in_search = 0;
+        let mut check_ply = if ply >= 2 { ply - 2 } else { 0 };
+        while check_ply < ply {
+            if self.search_history[check_ply] == hash {
+                count_in_search += 1;
+            }
+            if check_ply >= 2 {
+                check_ply -= 2;
+            } else {
+                break;
+            }
+        }
+        
+        // If we've seen this position once before, it would be a repetition if we play it again
+        count_in_game + count_in_search >= 1
+    }
+
+    // Check if a move leads to a two-fold repetition (would be 3-fold if played)
+    pub fn is_repetition_move(&self, board: &Board, mv: ChessMove, ply: usize) -> bool {
+        let new_board = board.make_move_new(mv);
+        let new_hash = new_board.get_hash();
+        self.is_repetition(new_hash, ply + 1)
     }
 }
 
@@ -78,7 +118,6 @@ fn quiescence(board: &Board, eval_state: &EvalState, mut alpha: i32, beta: i32, 
     for mv in captures {
         let new_board = board.make_move_new(mv);
         
-        // Apply move incrementally
         let mut new_eval = *eval_state;
         new_eval.apply_move(board, mv, board.side_to_move());
         
@@ -102,6 +141,15 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
         return (0, vec![]);
     }
 
+    // Store current position hash in search history
+    let current_hash = board.get_hash();
+    state.search_history[ply_from_root] = current_hash;
+
+    // Check for repetition draw (but not at root)
+    if ply_from_root > 0 && state.is_repetition(current_hash, ply_from_root) {
+        return (0, vec![]);  // Repetition is a draw
+    }
+
     let alpha_orig = alpha;
 
     // TT probe
@@ -120,8 +168,6 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
     if ply_from_root > 0 && depth >= 3 && !in_check {
         if let Some(null_board) = board.null_move() {
             let r = if depth >= 6 { 3 } else { 2 };
-            
-            // Null move doesn't change eval state (just flips perspective)
             let (null_score, _) = negamax(&null_board, eval_state, depth - 1 - r, -beta, -beta + 1, ply_from_root + 1, state);
             
             if -null_score >= beta {
@@ -163,7 +209,6 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
         let new_board = board.make_move_new(mv);
         let gives_check = new_board.checkers() != &EMPTY;
 
-        // Apply move incrementally to eval state
         let mut new_eval = *eval_state;
         new_eval.apply_move(board, mv, board.side_to_move());
 
@@ -246,7 +291,6 @@ pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, s
     let start_time = Instant::now();
     let time_for_move = time_limit.unwrap_or(999999.0);
 
-    // Initialize eval state once at root
     let root_eval = EvalState::from_board(board);
 
     let mut moves: Vec<ChessMove> = MoveGen::new_legal(board).collect();
@@ -261,6 +305,20 @@ pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, s
 
     if !non_draw_moves.is_empty() {
         moves = non_draw_moves;
+    }
+
+    // IMPORTANT: Filter out repetition moves at root when we're winning
+    let static_eval = root_eval.get_score(board.side_to_move());
+    if static_eval > 100 {  // If we're winning by more than a pawn
+        let non_repetition_moves: Vec<ChessMove> = moves.iter()
+            .filter(|&&mv| !state.is_repetition_move(board, mv, 0))
+            .copied()
+            .collect();
+        
+        if !non_repetition_moves.is_empty() {
+            state.repetition_avoids = (moves.len() - non_repetition_moves.len()) as u64;
+            moves = non_repetition_moves;
+        }
     }
 
     moves.sort_by_cached_key(|&mv| -move_score(board, mv));
@@ -306,7 +364,6 @@ pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, s
 
                 let new_board = board.make_move_new(mv);
                 
-                // Apply move incrementally
                 let mut new_eval = root_eval;
                 new_eval.apply_move(board, mv, board.side_to_move());
                 
@@ -377,7 +434,8 @@ pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, s
     let fill_pct = (filled * 100) / state.tt.size;
     let (hits, misses, _) = state.tt.get_stats();
     println!("# TT: {}/{} entries ({}%), {} hits, {} misses", filled, state.tt.size, fill_pct, hits, misses);
-    println!("# Null cutoffs: {}, LMR: {}, PVS research: {}", state.null_cutoffs, state.lmr_attempts, state.pvs_research);
+    println!("# Null cutoffs: {}, LMR: {}, PVS research: {}, Repetitions avoided: {}", 
+        state.null_cutoffs, state.lmr_attempts, state.pvs_research, state.repetition_avoids);
 
     (best_move, all_root_moves)
 }

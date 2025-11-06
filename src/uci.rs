@@ -47,7 +47,8 @@ pub fn run() {
             "ucinewgame" => {
                 state.tt.clear();
                 state.history.clear();
-                println!("# New game - cleared TT and history");
+                state.position_history.clear();  // Clear position history for new game
+                println!("# New game - cleared TT, history, and position history");
                 stdout.flush().unwrap();
             }
             "position" => {
@@ -55,15 +56,23 @@ pub fn run() {
                     continue;
                 }
 
+                // Clear position history when setting a new position
+                state.position_history.clear();
+
                 if parts[1] == "startpos" {
                     board = Board::default();
+                    // Add starting position to history
+                    state.position_history.push(board.get_hash());
                     
                     if let Some(moves_pos) = parts.iter().position(|&p| p == "moves") {
                         for move_str in &parts[moves_pos + 1..] {
                             if let Ok(mv) = ChessMove::from_san(&board, move_str) {
                                 board = board.make_move_new(mv);
+                                // Track position after each move
+                                state.position_history.push(board.get_hash());
                             } else if let Ok(mv) = ChessMove::from_str(move_str) {
                                 board = board.make_move_new(mv);
+                                state.position_history.push(board.get_hash());
                             }
                         }
                     }
@@ -75,17 +84,27 @@ pub fn run() {
                     
                     if let Ok(new_board) = Board::from_str(&fen_str) {
                         board = new_board;
+                        // Add FEN position to history
+                        state.position_history.push(board.get_hash());
                         
                         if let Some(moves_pos) = moves_pos {
                             for move_str in &parts[moves_pos + 1..] {
                                 if let Ok(mv) = ChessMove::from_san(&board, move_str) {
                                     board = board.make_move_new(mv);
+                                    state.position_history.push(board.get_hash());
                                 } else if let Ok(mv) = ChessMove::from_str(move_str) {
                                     board = board.make_move_new(mv);
+                                    state.position_history.push(board.get_hash());
                                 }
                             }
                         }
                     }
+                }
+                
+                // Remove the current position from history (we don't want to count it twice)
+                // since we'll be searching from this position
+                if !state.position_history.is_empty() {
+                    state.position_history.pop();
                 }
             }
             "go" => {
