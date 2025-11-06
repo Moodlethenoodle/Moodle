@@ -1,4 +1,4 @@
-use chess::{Board, ChessMove, MoveGen, Piece, EMPTY};
+use chess::{Board, ChessMove, MoveGen, Piece};
 use crate::evaluation::piece_value;
 use crate::helpers::{mvv_lva_score, HistoryHeuristic, MAX_DEPTH};
 

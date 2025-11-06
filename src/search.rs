@@ -13,15 +13,17 @@ pub struct SearchState {
     pub tt: TranspositionTable,
     pub history: HistoryHeuristic,
     pub killer_moves: [[Option<ChessMove>; 2]; MAX_DEPTH],
+    pub counter_moves: [[Option<ChessMove>; 64]; 64],  // NEW: Counter move heuristic
     pub nodes_searched: u64,
     pub null_cutoffs: u64,
     pub lmr_attempts: u64,
     pub pvs_research: u64,
     pub repetition_avoids: u64,
+    pub futility_prunes: u64,  // NEW
     pub stop_search: bool,
     // Track position history for repetition detection
-    pub position_history: Vec<u64>,  // Zobrist hashes from game start
-    pub search_history: [u64; MAX_DEPTH * 2],  // Hashes during current search
+    pub position_history: Vec<u64>,
+    pub search_history: [u64; MAX_DEPTH * 2],
 }
 
 impl SearchState {
@@ -30,11 +32,13 @@ impl SearchState {
             tt: TranspositionTable::new(256),
             history: HistoryHeuristic::new(),
             killer_moves: [[None; 2]; MAX_DEPTH],
+            counter_moves: [[None; 64]; 64],
             nodes_searched: 0,
             null_cutoffs: 0,
             lmr_attempts: 0,
             pvs_research: 0,
             repetition_avoids: 0,
+            futility_prunes: 0,
             stop_search: false,
             position_history: Vec::new(),
             search_history: [0; MAX_DEPTH * 2],
@@ -47,18 +51,15 @@ impl SearchState {
         self.lmr_attempts = 0;
         self.pvs_research = 0;
         self.repetition_avoids = 0;
+        self.futility_prunes = 0;
         self.stop_search = false;
         self.killer_moves = [[None; 2]; MAX_DEPTH];
         self.search_history = [0; MAX_DEPTH * 2];
     }
 
-    // Check if position is a repetition
     pub fn is_repetition(&self, hash: u64, ply: usize) -> bool {
-        // Check game history (positions before search started)
         let count_in_game = self.position_history.iter().filter(|&&h| h == hash).count();
         
-        // Check search history (only check positions that can repeat - same side to move)
-        // We check every 2 plies (full moves) since same position different side can't repeat
         let mut count_in_search = 0;
         let mut check_ply = if ply >= 2 { ply - 2 } else { 0 };
         while check_ply < ply {
@@ -72,11 +73,9 @@ impl SearchState {
             }
         }
         
-        // If we've seen this position once before, it would be a repetition if we play it again
         count_in_game + count_in_search >= 1
     }
 
-    // Check if a move leads to a two-fold repetition (would be 3-fold if played)
     pub fn is_repetition_move(&self, board: &Board, mv: ChessMove, ply: usize) -> bool {
         let new_board = board.make_move_new(mv);
         let new_hash = new_board.get_hash();
@@ -85,6 +84,8 @@ impl SearchState {
 }
 
 fn quiescence(board: &Board, eval_state: &EvalState, mut alpha: i32, beta: i32, ply_from_root: i32, state: &mut SearchState) -> i32 {
+    state.nodes_searched += 1;
+    
     let stand_pat = evaluate_board_incremental(board, eval_state, ply_from_root);
     
     if stand_pat >= beta {
@@ -95,6 +96,7 @@ fn quiescence(board: &Board, eval_state: &EvalState, mut alpha: i32, beta: i32, 
         return stand_pat;
     }
     
+    // Delta pruning - if we're too far behind even after capturing the best piece
     const BIG_DELTA: i32 = 900;
     if stand_pat + BIG_DELTA < alpha {
         return alpha;
@@ -107,6 +109,14 @@ fn quiescence(board: &Board, eval_state: &EvalState, mut alpha: i32, beta: i32, 
     let mut move_gen = QuiescenceMoveGen::new(board);
     
     while let Some(mv) = move_gen.next() {
+        // NEW: Delta pruning per move
+        if let Some(captured) = board.piece_on(mv.get_dest()) {
+            let capture_value = crate::evaluation::piece_value(captured);
+            if stand_pat + capture_value + 200 < alpha {
+                continue;
+            }
+        }
+        
         let new_board = board.make_move_new(mv);
         
         let mut new_eval = *eval_state;
@@ -125,7 +135,16 @@ fn quiescence(board: &Board, eval_state: &EvalState, mut alpha: i32, beta: i32, 
     alpha
 }
 
-fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, beta: i32, ply_from_root: usize, state: &mut SearchState) -> (i32, Vec<ChessMove>) {
+fn negamax(
+    board: &Board, 
+    eval_state: &EvalState, 
+    depth: i32, 
+    mut alpha: i32, 
+    beta: i32, 
+    ply_from_root: usize, 
+    state: &mut SearchState,
+    prev_move: Option<ChessMove>,  // NEW: for counter move heuristic
+) -> (i32, Vec<ChessMove>) {
     state.nodes_searched += 1;
 
     if state.stop_search {
@@ -138,14 +157,15 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
 
     // Check for repetition draw (but not at root)
     if ply_from_root > 0 && state.is_repetition(current_hash, ply_from_root) {
-        return (0, vec![]);  // Repetition is a draw
+        return (0, vec![]);
     }
 
     let alpha_orig = alpha;
+    let is_pv_node = beta - alpha > 1;
 
     // TT probe
     let (tt_hit, tt_score, tt_move) = state.tt.probe(board, depth, alpha, beta, ply_from_root as i32);
-    if tt_hit && ply_from_root > 0 {
+    if tt_hit && ply_from_root > 0 && !is_pv_node {
         return (tt_score, tt_move.map_or(vec![], |m| vec![m]));
     }
 
@@ -156,17 +176,49 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
 
     let in_check = board.checkers() != &EMPTY;
     
-    if ply_from_root > 0 && depth >= 3 && !in_check {
+    let mated_value = -MATE_SCORE + ply_from_root as i32;
+    if mated_value > alpha {
+        alpha = mated_value;
+        if beta <= mated_value {
+            return (mated_value, vec![]);
+        }
+    }
+    
+    // Static evaluation for pruning decisions
+    let static_eval = if in_check {
+        -INFINITY
+    } else {
+        evaluate_board_incremental(board, eval_state, ply_from_root as i32)
+    };
+    
+    // NEW: Reverse futility pruning (static null move pruning)
+    if !is_pv_node && !in_check && depth <= 6 && static_eval - 80 * depth >= beta {
+        return (static_eval, vec![]);
+    }
+    
+    // Null move pruning
+    if ply_from_root > 0 && depth >= 3 && !in_check && static_eval >= beta {
         if let Some(null_board) = board.null_move() {
             let r = if depth >= 6 { 3 } else { 2 };
-            let (null_score, _) = negamax(&null_board, eval_state, depth - 1 - r, -beta, -beta + 1, ply_from_root + 1, state);
+            let (null_score, _) = negamax(&null_board, eval_state, depth - 1 - r, -beta, -beta + 1, ply_from_root + 1, state, None);
             
             if -null_score >= beta {
                 state.null_cutoffs += 1;
-                return (beta, vec![]);
+                // NEW: Don't return mate scores from null move
+                if null_score.abs() < MATE_SCORE - 100 {
+                    return (beta, vec![]);
+                }
             }
         }
     }
+    
+    // NEW: Internal Iterative Deepening - search for a good move if we don't have a TT move
+    let tt_move = if tt_move.is_none() && depth >= 4 && is_pv_node {
+        let (_, pv) = negamax(board, eval_state, depth - 2, alpha, beta, ply_from_root, state, prev_move);
+        pv.first().copied()
+    } else {
+        tt_move
+    };
 
     let mut move_gen = IncrementalMoveGen::new(board, tt_move, ply_from_root, &state.history, &state.killer_moves);
 
@@ -174,6 +226,7 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
     let mut best_move = None;
     let mut pv = vec![];
     let mut move_count = 0;
+    let mut quiets_tried = Vec::new();
 
     while let Some(mv) = move_gen.next(board, &state.history) {
         let is_capture = board.piece_on(mv.get_dest()).is_some() ||
@@ -184,39 +237,86 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
         let new_board = board.make_move_new(mv);
         let gives_check = new_board.checkers() != &EMPTY;
 
+        // NEW: Futility pruning - skip quiet moves in shallow nodes when we're far behind
+        if !is_pv_node && !in_check && !gives_check && !is_capture && mv.get_promotion().is_none() 
+            && depth <= 3 && move_count > 0 {
+            let futility_margin = 150 * depth;
+            if static_eval + futility_margin <= alpha {
+                state.futility_prunes += 1;
+                continue;
+            }
+        }
+        
+        // NEW: SEE pruning for late quiet moves
+        if !is_pv_node && !in_check && depth <= 8 && move_count >= 3 && !is_capture && !gives_check {
+            // Skip late quiet moves in non-PV nodes
+            if move_count >= 3 + depth as usize * 2 {
+                continue;
+            }
+        }
+
         let mut new_eval = *eval_state;
         new_eval.apply_move(board, mv, board.side_to_move());
 
         let score = if move_count == 0 {
-            let (s, sub_pv) = negamax(&new_board, &new_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state);
+            let (s, sub_pv) = negamax(&new_board, &new_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state, Some(mv));
             pv = sub_pv;
             -s
         } else {
             // LMR
-            let mut reduction = 0;
+            let mut reduction: i32 = 0;
             if !in_check && !gives_check && !is_capture && mv.get_promotion().is_none() && move_count >= 3 && depth >= 3 {
                 reduction = 1;
-                if move_count >= 6 && depth >= 5 {
-                    reduction = 2;
+                
+                // NEW: Increase reduction for non-PV nodes
+                if !is_pv_node {
+                    reduction += 1;
                 }
+                
+                if move_count >= 6 && depth >= 5 {
+                    reduction += 1;
+                }
+                
+                // NEW: Reduce less for killer moves and counter moves
+                if ply_from_root < MAX_DEPTH {
+                    if Some(mv) == state.killer_moves[ply_from_root][0] || 
+                       Some(mv) == state.killer_moves[ply_from_root][1] {
+                        reduction = (reduction - 1).max(0);
+                    }
+                }
+                
+                // Check counter move
+                if let Some(prev) = prev_move {
+                    let from = prev.get_source().to_index();
+                    let to = prev.get_dest().to_index();
+                    if Some(mv) == state.counter_moves[from][to] {
+                        reduction = (reduction - 1).max(0);
+                    }
+                }
+                
+                // NEW: Reduce less if move gives check
+                // (already handled by gives_check condition above)
+                
+                reduction = reduction.min(depth - 1);
+                
                 if reduction > 0 {
                     state.lmr_attempts += 1;
                 }
             }
 
-            let (s, mut sub_pv) = negamax(&new_board, &new_eval, depth - 1 - reduction, -alpha - 1, -alpha, ply_from_root + 1, state);
+            let (s, mut sub_pv) = negamax(&new_board, &new_eval, depth - 1 - reduction, -alpha - 1, -alpha, ply_from_root + 1, state, Some(mv));
             let mut score = -s;
 
             if score > alpha {
                 if reduction > 0 {
-                    let (s2, sub_pv2) = negamax(&new_board, &new_eval, depth - 1, -alpha - 1, -alpha, ply_from_root + 1, state);
+                    let (s2, sub_pv2) = negamax(&new_board, &new_eval, depth - 1, -alpha - 1, -alpha, ply_from_root + 1, state, Some(mv));
                     score = -s2;
                     sub_pv = sub_pv2;
                 }
 
                 if alpha < score && score < beta {
                     state.pvs_research += 1;
-                    let (s3, sub_pv3) = negamax(&new_board, &new_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state);
+                    let (s3, sub_pv3) = negamax(&new_board, &new_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state, Some(mv));
                     score = -s3;
                     sub_pv = sub_pv3;
                 }
@@ -227,6 +327,10 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
         };
 
         move_count += 1;
+        
+        if !is_capture {
+            quiets_tried.push(mv);
+        }
 
         if score > best_score {
             best_score = score;
@@ -239,10 +343,29 @@ fn negamax(board: &Board, eval_state: &EvalState, depth: i32, mut alpha: i32, be
                 alpha = score;
 
                 if score >= beta {
-                    state.history.update(mv, depth, ply_from_root);
+                    // Update history and killers
                     if !is_capture && ply_from_root < MAX_DEPTH {
-                        state.killer_moves[ply_from_root][1] = state.killer_moves[ply_from_root][0];
-                        state.killer_moves[ply_from_root][0] = Some(mv);
+                        state.history.update(mv, depth, ply_from_root);
+                        
+                        // Update killers
+                        if state.killer_moves[ply_from_root][0] != Some(mv) {
+                            state.killer_moves[ply_from_root][1] = state.killer_moves[ply_from_root][0];
+                            state.killer_moves[ply_from_root][0] = Some(mv);
+                        }
+                        
+                        // NEW: Update counter move
+                        if let Some(prev) = prev_move {
+                            let from = prev.get_source().to_index();
+                            let to = prev.get_dest().to_index();
+                            state.counter_moves[from][to] = Some(mv);
+                        }
+                        
+                        // NEW: Penalize quiets that failed
+                        for &quiet in &quiets_tried {
+                            if quiet != mv {
+                                state.history.penalize(quiet, depth);
+                            }
+                        }
                     }
 
                     state.tt.store(board, depth, beta, TTFlag::LowerBound, best_move, ply_from_root as i32);
@@ -292,9 +415,8 @@ pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, s
         moves = non_draw_moves;
     }
 
-    // IMPORTANT: Filter out repetition moves at root when we're winning
     let static_eval = root_eval.get_score(board.side_to_move());
-    if static_eval > 100 {  // If we're winning by more than a pawn
+    if static_eval > 100 {
         let non_repetition_moves: Vec<ChessMove> = moves.iter()
             .filter(|&&mv| !state.is_repetition_move(board, mv, 0))
             .copied()
@@ -352,7 +474,7 @@ pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, s
                 let mut new_eval = root_eval;
                 new_eval.apply_move(board, mv, board.side_to_move());
                 
-                let (score, pv) = negamax(&new_board, &new_eval, current_depth - 1, -search_beta, -search_alpha, 1, state);
+                let (score, pv) = negamax(&new_board, &new_eval, current_depth - 1, -search_beta, -search_alpha, 1, state, Some(mv));
                 let score = -score;
 
                 if score > current_best_score {
@@ -419,8 +541,8 @@ pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, s
     let fill_pct = (filled * 100) / state.tt.size;
     let (hits, misses, _) = state.tt.get_stats();
     println!("# TT: {}/{} entries ({}%), {} hits, {} misses", filled, state.tt.size, fill_pct, hits, misses);
-    println!("# Null cutoffs: {}, LMR: {}, PVS research: {}, Repetitions avoided: {}", 
-        state.null_cutoffs, state.lmr_attempts, state.pvs_research, state.repetition_avoids);
+    println!("# Stats - Null: {}, LMR: {}, PVS: {}, Futility: {}, Reps avoided: {}", 
+        state.null_cutoffs, state.lmr_attempts, state.pvs_research, state.futility_prunes, state.repetition_avoids);
 
     (best_move, all_root_moves)
 }

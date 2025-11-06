@@ -1,4 +1,4 @@
-use chess::{Board, Color, Piece, Square, ChessMove, BitBoard, File};
+use chess::{Board, Color, Piece, Square, ChessMove, BitBoard};
 
 pub const PAWN_VALUE: i32 = 100;
 pub const KNIGHT_VALUE: i32 = 300;
