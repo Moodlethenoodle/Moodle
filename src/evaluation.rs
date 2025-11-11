@@ -263,7 +263,7 @@ impl PawnStructure {
         
         // Check if advance square is attacked by enemy pawn
         let advance_rank = if color == Color::White { rank + 1 } else { rank - 1 };
-        if advance_rank < 0 || advance_rank > 7 {
+        if advance_rank > 7 {
             return false;
         }
         

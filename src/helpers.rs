@@ -73,6 +73,8 @@ pub fn move_score(board: &Board, mv: ChessMove) -> i32 {
     mvv_lva_score(board, mv)
 }
 
+/*
+
 pub fn capture_exchange_value(board: &Board, mv: ChessMove) -> i32 {
     // Check if this is a capture (including en passant)
     let is_capture = board.piece_on(mv.get_dest()).is_some() || 
@@ -131,3 +133,5 @@ pub fn order_moves(
     scored_moves.sort_by(|a, b| b.0.cmp(&a.0));
     *moves = scored_moves.into_iter().map(|(_, _, mv)| mv).collect();
 }
+
+*/

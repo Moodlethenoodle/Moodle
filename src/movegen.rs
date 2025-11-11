@@ -29,7 +29,7 @@ impl IncrementalMoveGen {
         board: &Board,
         tt_move: Option<ChessMove>,
         ply: usize,
-        history: &HistoryHeuristic,
+        _history: &HistoryHeuristic,
         killer_moves: &[[Option<ChessMove>; 2]; MAX_DEPTH],
     ) -> Self {
         let killers = if ply < MAX_DEPTH {
@@ -278,14 +278,6 @@ impl IncrementalMoveGen {
         gain >= threshold
     }
 
-    pub fn skip_quiets(&mut self) {
-        if self.stage == MoveGenStage::Killers ||
-           self.stage == MoveGenStage::GenerateQuiets ||
-           self.stage == MoveGenStage::Quiets {
-            self.stage = MoveGenStage::BadCaptures;
-            self.current_index = 0;
-        }
-    }
 }
 
 // Quiescence move generator (captures only)
