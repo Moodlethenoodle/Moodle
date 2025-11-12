@@ -628,7 +628,6 @@ pub fn evaluate_board_incremental(board: &Board, eval_state: &EvalState, ply_fro
     let white_mobility = evaluate_mobility(board, Color::White);
     let black_mobility = evaluate_mobility(board, Color::Black);
     let mobility_diff = white_mobility - black_mobility;
-    
     let white_king_safety = evaluate_king_safety(board, Color::White, is_endgame);
     let black_king_safety = evaluate_king_safety(board, Color::Black, is_endgame);
     let king_safety_diff = white_king_safety - black_king_safety;
