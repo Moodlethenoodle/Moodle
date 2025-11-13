@@ -580,27 +580,33 @@ fn evaluate_king_safety(board: &Board, color: Color, is_endgame: bool) -> i32 {
     
     let mut score = 0;
     
-    // Find king
     let king_sq = (board.pieces(Piece::King) & board.color_combined(color)).to_square();
     let king_file = king_sq.get_file().to_index();
     let king_rank = king_sq.get_rank().to_index();
     
-    // Pawn shield
     let our_pawns = board.pieces(Piece::Pawn) & board.color_combined(color);
-    let shield_rank = if color == Color::White { king_rank + 1 } else { king_rank - 1 };
     
-    if shield_rank <= 7 {
-        for file_offset in -1..=1 {
-            let check_file = (king_file as i32 + file_offset) as usize;
-            if check_file < 8 {
-                for pawn_sq in our_pawns {
-                    if pawn_sq.get_file().to_index() == check_file {
-                        let pawn_rank = pawn_sq.get_rank().to_index();
-                        if color == Color::White && pawn_rank >= shield_rank && pawn_rank <= shield_rank + 1 {
-                            score += PAWN_SHIELD_BONUS;
-                        } else if color == Color::Black && pawn_rank <= shield_rank && pawn_rank >= shield_rank - 1 {
-                            score += PAWN_SHIELD_BONUS;
-                        }
+    // Fixed: Proper bounds checking for both colors
+    for file_offset in -1..=1 {
+        let check_file = king_file as i32 + file_offset;
+        if check_file < 0 || check_file > 7 {
+            continue;
+        }
+        let check_file = check_file as usize;
+        
+        for pawn_sq in our_pawns {
+            if pawn_sq.get_file().to_index() == check_file {
+                let pawn_rank = pawn_sq.get_rank().to_index();
+                
+                // White: pawns should be 1-2 ranks ahead (higher rank numbers)
+                if color == Color::White {
+                    if pawn_rank >= king_rank + 1 && pawn_rank <= king_rank + 2 {
+                        score += PAWN_SHIELD_BONUS;
+                    }
+                } else {
+                    // Black: pawns should be 1-2 ranks ahead (lower rank numbers)
+                    if pawn_rank + 2 >= king_rank && pawn_rank <= king_rank {
+                        score += PAWN_SHIELD_BONUS;
                     }
                 }
             }
