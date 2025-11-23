@@ -1,0 +1,12 @@
+[package]
+name = "Moodle-release"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chess = "3.2.0"
+rand = "0.9.2"
+
+[[bin]]
+name = "Moodle-release"
+path = "src/main.rs"
