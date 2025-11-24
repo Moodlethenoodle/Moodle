@@ -43,7 +43,6 @@ impl HistoryHeuristic {
 pub fn mvv_lva_score(board: &Board, mv: ChessMove) -> i32 {
     let mut score = 0;
     
-    // Check if this is a capture (including en passant)
     let is_capture = board.piece_on(mv.get_dest()).is_some() || 
                      (board.piece_on(mv.get_source()) == Some(chess::Piece::Pawn) && 
                       mv.get_source().get_file() != mv.get_dest().get_file() &&
@@ -55,9 +54,8 @@ pub fn mvv_lva_score(board: &Board, mv: ChessMove) -> i32 {
                 score = piece_value(victim) * 10 - piece_value(attacker);
             }
         } else {
-            // En passant capture - victim is a pawn
             if let Some(attacker) = board.piece_on(mv.get_source()) {
-                score = 100 * 10 - piece_value(attacker); // Pawn value is 100
+                score = 100 * 10 - piece_value(attacker);
             }
         }
     }

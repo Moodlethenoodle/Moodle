@@ -1,4 +1,4 @@
-use chess::{Board, Color, Piece, Square, ChessMove, File, EMPTY};
+use chess::{Board, Color, Piece, Square, ChessMove, File};
 
 // Material values
 pub const PAWN_VALUE: i32 = 100;
@@ -7,7 +7,6 @@ pub const BISHOP_VALUE: i32 = 330;
 pub const ROOK_VALUE: i32 = 500;
 pub const QUEEN_VALUE: i32 = 900;
 
-// Evaluation weights
 const BISHOP_PAIR_BONUS: i32 = 30;
 const DOUBLED_PAWN_PENALTY: i32 = 10;
 const ISOLATED_PAWN_PENALTY: i32 = 20;

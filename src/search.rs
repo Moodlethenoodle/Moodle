@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::evaluation::{evaluate_board_incremental, EvalState};
 use crate::helpers::{move_score, HistoryHeuristic, MAX_DEPTH};
 use crate::tt::{TranspositionTable, TTFlag};
-use crate::movegen::{IncrementalMoveGen, QuiescenceMoveGen};
+use crate::movegen::{QuiescenceMoveGen};
 
 const MATE_SCORE: i32 = 100000;
 const INFINITY: i32 = 1000000;
