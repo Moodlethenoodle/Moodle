@@ -19,6 +19,9 @@ const MOBILITY_BISHOP: i32 = 3;
 const MOBILITY_ROOK: i32 = 2;
 const MOBILITY_QUEEN: i32 = 1;
 const PAWN_SHIELD: i32 = 10;
+const CONNECTED_ROOKS: i32 = 15;
+const KING_ATTACK_WEIGHT: i32 = 5;
+const WEAK_KING_SQUARE: i32 = 15;
 
 // Piece-square tables (from White's perspective)
 pub const PAWN_PST: [i32; 64] = [
@@ -468,25 +471,171 @@ fn eval_king_safety(board: &Board) -> i32 {
     let white_pawns = board.pieces(Piece::Pawn) & board.color_combined(Color::White);
     let black_pawns = board.pieces(Piece::Pawn) & board.color_combined(Color::Black);
     
-    // White king shield
+    // White king shield with improved logic
     let wk_file = white_king.get_file().to_index();
     let wk_rank = white_king.get_rank().to_index();
+    let mut white_shield_count = 0;
+    
+    // Check pawn shield (pawns in front and diagonally in front)
     for pawn_sq in white_pawns {
         let p_file = pawn_sq.get_file().to_index();
         let p_rank = pawn_sq.get_rank().to_index();
-        if p_file.abs_diff(wk_file) <= 1 && p_rank > wk_rank && p_rank <= wk_rank + 2 {
+        let file_diff = p_file.abs_diff(wk_file);
+        
+        // Pawns directly in front of king (1-2 squares ahead)
+        if file_diff <= 1 && p_rank > wk_rank && p_rank <= wk_rank + 2 {
+            white_shield_count += 1;
             score += PAWN_SHIELD;
+            
+            // Bonus for pawns on their starting rank (unmoved)
+            if p_rank == 1 && wk_rank == 0 {
+                score += 5;
+            }
         }
     }
     
-    // Black king shield
+    // Penalty for weak squares near king (missing pawn shield)
+    if white_shield_count < 2 && wk_rank < 2 {
+        score -= WEAK_KING_SQUARE * (2 - white_shield_count);
+    }
+    
+    // King exposure penalty (being in center or advanced)
+    if wk_rank > 2 {
+        score -= 10 * (wk_rank - 2) as i32;
+    }
+    if wk_file > 1 && wk_file < 6 {
+        score -= 15; // Penalty for king in center files
+    }
+    
+    // Check for attacking pieces near white king
+    let king_zone = chess::get_king_moves(white_king);
+    let mut attack_count = 0;
+    
+    for sq in *board.color_combined(Color::Black) {
+        if let Some(piece) = board.piece_on(sq) {
+            let attacks = match piece {
+                Piece::Knight => chess::get_knight_moves(sq),
+                Piece::Bishop => chess::get_bishop_moves(sq, *board.combined()),
+                Piece::Rook => chess::get_rook_moves(sq, *board.combined()),
+                Piece::Queen => chess::get_bishop_moves(sq, *board.combined()) | chess::get_rook_moves(sq, *board.combined()),
+                _ => chess::EMPTY,
+            };
+            
+            if (attacks & king_zone).popcnt() > 0 {
+                attack_count += match piece {
+                    Piece::Knight | Piece::Bishop => 1,
+                    Piece::Rook => 2,
+                    Piece::Queen => 3,
+                    _ => 0,
+                };
+            }
+        }
+    }
+    
+    score -= attack_count * KING_ATTACK_WEIGHT;
+    
+    // Black king shield (mirrored logic)
     let bk_file = black_king.get_file().to_index();
     let bk_rank = black_king.get_rank().to_index();
+    let mut black_shield_count = 0;
+    
     for pawn_sq in black_pawns {
         let p_file = pawn_sq.get_file().to_index();
         let p_rank = pawn_sq.get_rank().to_index();
-        if p_file.abs_diff(bk_file) <= 1 && p_rank < bk_rank && p_rank >= bk_rank.saturating_sub(2) {
+        let file_diff = p_file.abs_diff(bk_file);
+        
+        if file_diff <= 1 && p_rank < bk_rank && p_rank >= bk_rank.saturating_sub(2) {
+            black_shield_count += 1;
             score -= PAWN_SHIELD;
+            
+            if p_rank == 6 && bk_rank == 7 {
+                score -= 5;
+            }
+        }
+    }
+    
+    if black_shield_count < 2 && bk_rank > 5 {
+        score += WEAK_KING_SQUARE * (2 - black_shield_count);
+    }
+    
+    if bk_rank < 5 {
+        score += 10 * (5 - bk_rank) as i32;
+    }
+    if bk_file > 1 && bk_file < 6 {
+        score += 15;
+    }
+    
+    // Check for attacking pieces near black king
+    let king_zone = chess::get_king_moves(black_king);
+    attack_count = 0;
+    
+    for sq in *board.color_combined(Color::White) {
+        if let Some(piece) = board.piece_on(sq) {
+            let attacks = match piece {
+                Piece::Knight => chess::get_knight_moves(sq),
+                Piece::Bishop => chess::get_bishop_moves(sq, *board.combined()),
+                Piece::Rook => chess::get_rook_moves(sq, *board.combined()),
+                Piece::Queen => chess::get_bishop_moves(sq, *board.combined()) | chess::get_rook_moves(sq, *board.combined()),
+                _ => chess::EMPTY,
+            };
+            
+            if (attacks & king_zone).popcnt() > 0 {
+                attack_count += match piece {
+                    Piece::Knight | Piece::Bishop => 1,
+                    Piece::Rook => 2,
+                    Piece::Queen => 3,
+                    _ => 0,
+                };
+            }
+        }
+    }
+    
+    score += attack_count * KING_ATTACK_WEIGHT;
+    
+    score
+}
+
+fn eval_connected_rooks(board: &Board) -> i32 {
+    let mut score = 0;
+    
+    let white_rooks = board.pieces(Piece::Rook) & board.color_combined(Color::White);
+    let black_rooks = board.pieces(Piece::Rook) & board.color_combined(Color::Black);
+    
+    // Check white rooks
+    if white_rooks.popcnt() >= 2 {
+        let rook_squares: Vec<Square> = white_rooks.into_iter().collect();
+        for i in 0..rook_squares.len() {
+            for j in (i + 1)..rook_squares.len() {
+                let sq1 = rook_squares[i];
+                let sq2 = rook_squares[j];
+                
+                // Check if rooks are on same rank or file
+                if sq1.get_rank() == sq2.get_rank() || sq1.get_file() == sq2.get_file() {
+                    // Check if path between them is clear
+                    let attacks1 = chess::get_rook_moves(sq1, *board.combined());
+                    if attacks1.0 & (1u64 << sq2.to_index()) != 0 {
+                        score += CONNECTED_ROOKS;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Check black rooks
+    if black_rooks.popcnt() >= 2 {
+        let rook_squares: Vec<Square> = black_rooks.into_iter().collect();
+        for i in 0..rook_squares.len() {
+            for j in (i + 1)..rook_squares.len() {
+                let sq1 = rook_squares[i];
+                let sq2 = rook_squares[j];
+                
+                if sq1.get_rank() == sq2.get_rank() || sq1.get_file() == sq2.get_file() {
+                    let attacks1 = chess::get_rook_moves(sq1, *board.combined());
+                    if attacks1.0 & (1u64 << sq2.to_index()) != 0 {
+                        score -= CONNECTED_ROOKS;
+                    }
+                }
+            }
         }
     }
     
@@ -516,7 +665,9 @@ pub fn evaluate_board_incremental(board: &Board, eval_state: &EvalState, ply_fro
     // Positional evaluation (computed fresh each time)
     score += eval_pawns(board);
     score += eval_rooks(board);
+    score += eval_connected_rooks(board);
     score += eval_mobility(board);
+    
     
     // King safety only in middlegame
     if phase > 12 {
