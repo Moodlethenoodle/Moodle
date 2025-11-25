@@ -126,7 +126,7 @@ impl SearchState {
     }
 }
 
-fn quiescence(board: &Board, eval_state: &EvalState, mut alpha: i32, beta: i32, ply_from_root: i32, state: &mut SearchState) -> i32 {
+fn quiescence(board: &Board, eval_state: &mut EvalState, mut alpha: i32, beta: i32, ply_from_root: i32, state: &mut SearchState) -> i32 {
     state.nodes_searched += 1;
     
     let stand_pat = evaluate_board_incremental(board, eval_state, ply_from_root);
@@ -163,7 +163,7 @@ fn quiescence(board: &Board, eval_state: &EvalState, mut alpha: i32, beta: i32, 
         let mut new_eval = *eval_state;
         new_eval.apply_move(board, mv, board.side_to_move());
         
-        let score = -quiescence(&new_board, &new_eval, -beta, -alpha, ply_from_root + 1, state);
+        let score = -quiescence(&new_board, &mut new_eval, -beta, -alpha, ply_from_root + 1, state);
         
         if score >= beta {
             return beta;
@@ -178,7 +178,7 @@ fn quiescence(board: &Board, eval_state: &EvalState, mut alpha: i32, beta: i32, 
 
 fn negamax(
     board: &Board, 
-    eval_state: &EvalState, 
+    eval_state: &mut EvalState, 
     depth: i32, 
     mut alpha: i32, 
     beta: i32, 
@@ -235,7 +235,8 @@ fn negamax(
     if ply_from_root > 0 && depth >= 3 && !in_check && static_eval >= beta {
         if let Some(null_board) = board.null_move() {
             let r = if depth >= 6 { 3 } else { 2 };
-            let (null_score, _) = negamax(&null_board, eval_state, depth - 1 - r, -beta, -beta + 1, ply_from_root + 1, state, None);
+            let mut null_eval = *eval_state;
+            let (null_score, _) = negamax(&null_board, &mut null_eval, depth - 1 - r, -beta, -beta + 1, ply_from_root + 1, state, None);
             
             if -null_score >= beta {
                 state.null_cutoffs += 1;
@@ -247,7 +248,8 @@ fn negamax(
     }
     
     let tt_move = if tt_move.is_none() && depth >= 4 && is_pv_node {
-        let (_, pv) = negamax(board, eval_state, depth - 2, alpha, beta, ply_from_root, state, prev_move);
+        let mut iid_eval = *eval_state;
+        let (_, pv) = negamax(board, &mut iid_eval, depth - 2, alpha, beta, ply_from_root, state, prev_move);
         pv.first().copied()
     } else {
         tt_move
@@ -283,7 +285,7 @@ fn negamax(
 
         if !is_pv_node && !in_check && !gives_check && !is_capture && mv.get_promotion().is_none() 
             && depth <= 3 && move_count > 0 {
-            let futility_margin = 150 * depth;
+            let futility_margin = 250 * depth;
             if static_eval + futility_margin <= alpha {
                 state.futility_prunes += 1;
                 continue;
@@ -300,7 +302,7 @@ fn negamax(
         new_eval.apply_move(board, mv, board.side_to_move());
 
         let score = if move_count == 0 {
-            let (s, sub_pv) = negamax(&new_board, &new_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state, Some(mv));
+            let (s, sub_pv) = negamax(&new_board, &mut new_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state, Some(mv));
             pv = sub_pv;
             -s
         } else {
@@ -339,19 +341,23 @@ fn negamax(
                 }
             }
 
-            let (s, mut sub_pv) = negamax(&new_board, &new_eval, depth - 1 - reduction, -alpha - 1, -alpha, ply_from_root + 1, state, Some(mv));
+            let (s, mut sub_pv) = negamax(&new_board, &mut new_eval, depth - 1 - reduction, -alpha - 1, -alpha, ply_from_root + 1, state, Some(mv));
             let mut score = -s;
 
             if score > alpha {
                 if reduction > 0 {
-                    let (s2, sub_pv2) = negamax(&new_board, &new_eval, depth - 1, -alpha - 1, -alpha, ply_from_root + 1, state, Some(mv));
+                    let mut research_eval = *eval_state;
+                    research_eval.apply_move(board, mv, board.side_to_move());
+                    let (s2, sub_pv2) = negamax(&new_board, &mut research_eval, depth - 1, -alpha - 1, -alpha, ply_from_root + 1, state, Some(mv));
                     score = -s2;
                     sub_pv = sub_pv2;
                 }
 
                 if alpha < score && score < beta {
                     state.pvs_research += 1;
-                    let (s3, sub_pv3) = negamax(&new_board, &new_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state, Some(mv));
+                    let mut pvs_eval = *eval_state;
+                    pvs_eval.apply_move(board, mv, board.side_to_move());
+                    let (s3, sub_pv3) = negamax(&new_board, &mut pvs_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state, Some(mv));
                     score = -s3;
                     sub_pv = sub_pv3;
                 }
@@ -504,7 +510,7 @@ pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, s
                 let mut new_eval = root_eval;
                 new_eval.apply_move(board, mv, board.side_to_move());
                 
-                let (score, pv) = negamax(&new_board, &new_eval, current_depth - 1, -search_beta, -search_alpha, 1, state, Some(mv));
+                let (score, pv) = negamax(&new_board, &mut new_eval, current_depth - 1, -search_beta, -search_alpha, 1, state, Some(mv));
                 let score = -score;
 
                 if score > current_best_score {

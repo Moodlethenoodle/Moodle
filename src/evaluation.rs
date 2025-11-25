@@ -123,9 +123,14 @@ pub struct EvalState {
     pub mg_score: i32,
     pub eg_score: i32,
     pub material: i32,
-    pub phase: i32, // Material phase (higher = middlegame)
+    pub phase: i32,
     pub white_bishops: u8,
     pub black_bishops: u8,
+    // Cached positional scores
+    pub pawn_score: i32,
+    pub rook_score: i32,
+    pub king_safety_score: i32,
+    pub mobility_score: i32,
 }
 
 impl EvalState {
@@ -137,6 +142,10 @@ impl EvalState {
             phase: 0,
             white_bishops: 0,
             black_bishops: 0,
+            pawn_score: 0,
+            rook_score: 0,
+            king_safety_score: 0,
+            mobility_score: 0,
         }
     }
 
@@ -182,10 +191,15 @@ impl EvalState {
             }
         }
         
+        // Calculate positional features once
+        state.pawn_score = eval_pawns(board);
+        state.rook_score = eval_rooks(board) + eval_connected_rooks(board);
+        state.king_safety_score = eval_king_safety(board);
+        state.mobility_score = eval_mobility(board);
+        
         state
     }
 
-    // Add the missing get_score method
     pub fn get_score(&self, side_to_move: Color) -> i32 {
         let phase = self.phase.min(24);
         let mg_weight = phase;
@@ -204,13 +218,21 @@ impl EvalState {
         let to = mv.get_dest();
         let piece = board.piece_on(from).unwrap();
         
+        // Track what changed for positional updates
+        let mut pawn_changed = piece == Piece::Pawn;
+        let mut rook_changed = piece == Piece::Rook;
+        let mut king_changed = piece == Piece::King;
+        
         // Handle captures
         if let Some(captured) = board.piece_on(to) {
             self.remove_piece(captured, !color, to);
+            pawn_changed |= captured == Piece::Pawn;
+            rook_changed |= captured == Piece::Rook;
         } else if piece == Piece::Pawn && from.get_file() != to.get_file() {
             // En passant
             let ep_sq = Square::make_square(from.get_rank(), to.get_file());
             self.remove_piece(Piece::Pawn, !color, ep_sq);
+            pawn_changed = true;
         }
         
         // Handle castling
@@ -222,15 +244,41 @@ impl EvalState {
             };
             self.remove_piece(Piece::Rook, color, rook_from);
             self.add_piece(Piece::Rook, color, rook_to);
+            rook_changed = true;
         }
         
         // Move piece
         self.remove_piece(piece, color, from);
         if let Some(promotion) = mv.get_promotion() {
             self.add_piece(promotion, color, to);
+            pawn_changed = true;
+            rook_changed |= promotion == Piece::Rook;
         } else {
             self.add_piece(piece, color, to);
         }
+        
+        // Update positional scores only for what changed
+        // We need the board AFTER the move, so we'll need to pass it in
+        // For now, mark them dirty and recalculate in evaluate_board_incremental
+        // This is a simplification - true incremental updates would be more complex
+        
+        // Simple approach: recalculate only if relevant pieces moved
+        if pawn_changed {
+            // Mark pawn score as needing recalculation
+            // We'll do this in evaluate_board_incremental by checking if a pawn moved
+            self.pawn_score = i32::MIN; // Sentinel value
+        }
+        
+        if rook_changed {
+            self.rook_score = i32::MIN; // Sentinel value
+        }
+        
+        if king_changed || pawn_changed {
+            self.king_safety_score = i32::MIN; // Sentinel value
+        }
+        
+        // Mobility changes on every move, so always recalculate
+        self.mobility_score = i32::MIN; // Sentinel value
     }
 
     #[inline]
@@ -642,7 +690,7 @@ fn eval_connected_rooks(board: &Board) -> i32 {
     score
 }
 
-pub fn evaluate_board_incremental(board: &Board, eval_state: &EvalState, ply_from_root: i32) -> i32 {
+pub fn evaluate_board_incremental(board: &Board, eval_state: &mut EvalState, ply_from_root: i32) -> i32 {
     let status = board.status();
     
     if status == chess::BoardStatus::Checkmate {
@@ -653,7 +701,7 @@ pub fn evaluate_board_incremental(board: &Board, eval_state: &EvalState, ply_fro
     }
     
     // Tapered eval between middlegame and endgame
-    let phase = eval_state.phase.min(24); // Cap at 24 (starting phase)
+    let phase = eval_state.phase.min(24);
     let mg_weight = phase;
     let eg_weight = 24 - phase;
     let mut score = (eval_state.mg_score * mg_weight + eval_state.eg_score * eg_weight) / 24;
@@ -662,16 +710,31 @@ pub fn evaluate_board_incremental(board: &Board, eval_state: &EvalState, ply_fro
     if eval_state.white_bishops >= 2 { score += BISHOP_PAIR_BONUS; }
     if eval_state.black_bishops >= 2 { score -= BISHOP_PAIR_BONUS; }
     
-    // Positional evaluation (computed fresh each time)
-    score += eval_pawns(board);
-    score += eval_rooks(board);
-    score += eval_connected_rooks(board);
-    score += eval_mobility(board);
+    // Recalculate positional features only if marked dirty
+    if eval_state.pawn_score == i32::MIN {
+        eval_state.pawn_score = eval_pawns(board);
+    }
+    score += eval_state.pawn_score;
     
+    if eval_state.rook_score == i32::MIN {
+        eval_state.rook_score = eval_rooks(board) + eval_connected_rooks(board);
+    }
+    score += eval_state.rook_score;
     
     // King safety only in middlegame
     if phase > 12 {
-        score += eval_king_safety(board);
+        if eval_state.king_safety_score == i32::MIN {
+            eval_state.king_safety_score = eval_king_safety(board);
+        }
+        score += eval_state.king_safety_score;
+    }
+    
+    // Mobility - simplified or only at low depths
+    if ply_from_root < 4 {
+        if eval_state.mobility_score == i32::MIN {
+            eval_state.mobility_score = eval_mobility(board);
+        }
+        score += eval_state.mobility_score;
     }
     
     // Return from side to move perspective
