@@ -52,60 +52,49 @@ pub fn run() {
                 stdout.flush().unwrap();
             }
             "position" => {
-                if parts.len() < 2 {
-                    continue;
-                }
-
-                // Clear position history when setting a new position
                 state.position_history.clear();
 
                 if parts[1] == "startpos" {
                     board = Board::default();
-                    // Add starting position to history
-                    state.position_history.push(board.get_hash());
+                    // DON'T add the starting position yet
                     
                     if let Some(moves_pos) = parts.iter().position(|&p| p == "moves") {
                         for move_str in &parts[moves_pos + 1..] {
+                            // Add position BEFORE making the move
+                            state.position_history.push(board.get_hash());
+                            
                             if let Ok(mv) = ChessMove::from_san(&board, move_str) {
                                 board = board.make_move_new(mv);
-                                // Track position after each move
-                                state.position_history.push(board.get_hash());
                             } else if let Ok(mv) = ChessMove::from_str(move_str) {
                                 board = board.make_move_new(mv);
-                                state.position_history.push(board.get_hash());
                             }
                         }
                     }
                 } else if parts[1] == "fen" {
                     let moves_pos = parts.iter().position(|&p| p == "moves");
-                    
                     let fen_end = moves_pos.unwrap_or(parts.len());
                     let fen_str = parts[2..fen_end].join(" ");
                     
                     if let Ok(new_board) = Board::from_str(&fen_str) {
                         board = new_board;
-                        // Add FEN position to history
-                        state.position_history.push(board.get_hash());
+                        // DON'T add the FEN position yet
                         
                         if let Some(moves_pos) = moves_pos {
                             for move_str in &parts[moves_pos + 1..] {
+                                // Add position BEFORE making the move
+                                state.position_history.push(board.get_hash());
+                                
                                 if let Ok(mv) = ChessMove::from_san(&board, move_str) {
                                     board = board.make_move_new(mv);
-                                    state.position_history.push(board.get_hash());
                                 } else if let Ok(mv) = ChessMove::from_str(move_str) {
                                     board = board.make_move_new(mv);
-                                    state.position_history.push(board.get_hash());
                                 }
                             }
                         }
                     }
                 }
-                
-                // Remove the current position from history (we don't want to count it twice)
-                // since we'll be searching from this position
-                if !state.position_history.is_empty() {
-                    state.position_history.pop();
-                }
+                // Now position_history contains all positions before the current one
+                // No need to pop anything!
             }
             "go" => {
                 let mut movetime = None;

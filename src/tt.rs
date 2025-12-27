@@ -19,6 +19,7 @@ pub struct TTEntry {
 pub struct TranspositionTable {
     pub table: Vec<Option<TTEntry>>,
     pub size: usize,
+    pub mask: usize,  // OPTIMIZED: Added mask for bitwise AND
     pub hits: u64,
     pub misses: u64,
 }
@@ -26,17 +27,28 @@ pub struct TranspositionTable {
 impl TranspositionTable {
     pub fn new(size_mb: usize) -> Self {
         let bytes_per_entry = 40;
-        let size = (size_mb * 1024 * 1024) / bytes_per_entry;
+        let entries = (size_mb * 1024 * 1024) / bytes_per_entry;
+        
+        // OPTIMIZED: Round to nearest power of 2 for bitwise indexing
+        let size = if entries.is_power_of_two() {
+            entries
+        } else {
+            entries.next_power_of_two() / 2
+        };
+        
         Self {
             table: vec![None; size],
             size,
+            mask: size - 1,  // OPTIMIZED: Pre-compute mask for fast indexing
             hits: 0,
             misses: 0,
         }
     }
 
+    // OPTIMIZED: Use bitwise AND instead of modulo
+    #[inline]
     fn index(&self, zobrist: u64) -> usize {
-        (zobrist as usize) % self.size
+        (zobrist as usize) & self.mask
     }
 
     pub fn store(&mut self, board: &Board, depth: i32, score: i32, flag: TTFlag, best_move: Option<ChessMove>, ply: i32) {
@@ -67,7 +79,6 @@ impl TranspositionTable {
             });
         }
     }
-
 
     pub fn probe(&mut self, board: &Board, depth: i32, alpha: i32, beta: i32, ply: i32) -> (bool, i32, Option<ChessMove>) {
         let zobrist = board.get_hash();

@@ -21,7 +21,6 @@ impl HistoryHeuristic {
         self.table[from][to] = (self.table[from][to] * 7 + bonus * 8) / 8;
     }
     
-    // NEW: Penalize moves that didn't cause cutoff
     pub fn penalize(&mut self, mv: ChessMove, depth: i32) {
         let penalty = depth * depth;
         let from = mv.get_source().to_index();

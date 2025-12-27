@@ -56,11 +56,8 @@ impl SearchState {
     }
 
     pub fn is_repetition(&self, hash: u64, ply: usize) -> bool {
-        // Count occurrences in the game history (positions before search started)
         let count_in_game = self.position_history.iter().filter(|&&h| h == hash).count();
         
-        // Count occurrences in the current search tree
-        // We check positions at ply-2, ply-4, ply-6, etc. (same side to move)
         let mut count_in_search = 0;
         let mut check_ply = ply;
         
@@ -71,9 +68,7 @@ impl SearchState {
             }
         }
         
-        // If this position occurred at least once before (either in game or search), it's a repetition
-        // We use >= 1 because the current position will make it the second occurrence
-        count_in_game + count_in_search >= 1
+        count_in_game + count_in_search >= 3
     }
     
     pub fn is_repetition_move(&self, board: &Board, mv: ChessMove, ply: usize) -> bool {
@@ -82,9 +77,7 @@ impl SearchState {
         self.is_repetition(new_hash, ply + 1)
     }
 
-    // NEW: Get move ordering score
     pub fn get_move_order_score(&self, board: &Board, mv: ChessMove, ply: usize, prev_move: Option<ChessMove>) -> i32 {
-        // Captures are highest priority
         let is_capture = board.piece_on(mv.get_dest()).is_some() ||
                         (board.piece_on(mv.get_source()) == Some(chess::Piece::Pawn) &&
                          mv.get_source().get_file() != mv.get_dest().get_file() &&
@@ -96,27 +89,34 @@ impl SearchState {
         
         let mut score = 0;
         
-        // Killer moves
+        // No legality checks - if killer doesn't match a legal move, it won't be used
         if ply < MAX_DEPTH {
-            if Some(mv) == self.killer_moves[ply][0] {
-                score = 900000;
-            } else if Some(mv) == self.killer_moves[ply][1] {
-                score = 800000;
+            if let Some(killer) = self.killer_moves[ply][0] {
+                if mv == killer {
+                    score = 900000;
+                }
             }
-        }
-        
-        // Counter move heuristic - if this move refutes the previous move
-        if score == 0 {
-            if let Some(prev) = prev_move {
-                let from = prev.get_source().to_index();
-                let to = prev.get_dest().to_index();
-                if Some(mv) == self.counter_moves[from][to] {
-                    score = 700000;
+            if score == 0 {
+                if let Some(killer) = self.killer_moves[ply][1] {
+                    if mv == killer {
+                        score = 800000;
+                    }
                 }
             }
         }
         
-        // History heuristic for remaining moves
+        if score == 0 {
+            if let Some(prev) = prev_move {
+                let from = prev.get_source().to_index();
+                let to = prev.get_dest().to_index();
+                if let Some(counter) = self.counter_moves[from][to] {
+                    if mv == counter {
+                        score = 700000;
+                    }
+                }
+            }
+        }
+        
         if score == 0 {
             score = self.history.get_score(mv);
         }
@@ -150,7 +150,7 @@ fn quiescence(board: &Board, eval_state: &mut EvalState, mut alpha: i32, beta: i
     
     // When in check, we must search ALL legal moves (not just captures)
     if in_check {
-        let mut move_gen = MoveGen::new_legal(board);
+        let move_gen = MoveGen::new_legal(board);
         let moves: Vec<ChessMove> = move_gen.collect();
         
         // Checkmate detection
@@ -185,7 +185,7 @@ fn quiescence(board: &Board, eval_state: &mut EvalState, mut alpha: i32, beta: i
         return alpha;
     }
     
-    let mut move_gen = MoveGen::new_legal(board);
+    let move_gen = MoveGen::new_legal(board);
     let mut moves: Vec<(ChessMove, i32, bool)> = Vec::with_capacity(32);
     
     for mv in move_gen {
@@ -279,7 +279,9 @@ fn negamax(
     let alpha_orig = alpha;
     let is_pv_node = beta - alpha > 1;
 
+    // FIXED: Don't validate TT move - trust it or let it fail naturally
     let (tt_hit, tt_score, tt_move) = state.tt.probe(board, depth, alpha, beta, ply_from_root as i32);
+    
     if tt_hit && ply_from_root > 0 && !is_pv_node {
         return (tt_score, tt_move.map_or(vec![], |m| vec![m]));
     }
@@ -324,6 +326,7 @@ fn negamax(
         }
     }
     
+    // FIXED: Don't validate IID move either
     let tt_move = if tt_move.is_none() && depth >= 4 && is_pv_node {
         let mut iid_eval = *eval_state;
         let (_, pv) = negamax(board, &mut iid_eval, depth - 2, alpha, beta, ply_from_root, state, prev_move);
@@ -332,42 +335,46 @@ fn negamax(
         tt_move
     };
 
-    // NEW: Generate and order all moves upfront with better scoring
-    let mut moves: Vec<ChessMove> = MoveGen::new_legal(board).collect();
-    
-    // Sort moves by ordering score
-    moves.sort_by_cached_key(|&mv| {
-        let mut score = state.get_move_order_score(board, mv, ply_from_root, prev_move);
-        // TT move gets highest priority
-        if Some(mv) == tt_move {
-            score = 100000000;
-        }
-        -score
-    });
+    struct ScoredMove {
+        mv: ChessMove,
+        score: i32,
+        is_capture: bool,
+        gives_check: bool,
+    }
+
+    let mut scored_moves: Vec<ScoredMove> = MoveGen::new_legal(board)
+        .map(|mv| {
+            let dest_piece = board.piece_on(mv.get_dest());
+            let source_piece = board.piece_on(mv.get_source());
+            
+            let is_capture = dest_piece.is_some() || 
+                            (source_piece == Some(chess::Piece::Pawn) &&
+                             mv.get_source().get_file() != mv.get_dest().get_file());
+            
+            let new_board = board.make_move_new(mv);
+            let gives_check = new_board.checkers() != &EMPTY;
+            
+            let mut score = state.get_move_order_score(board, mv, ply_from_root, prev_move);
+            if Some(mv) == tt_move {
+                score = 100000000;
+            }
+            
+            ScoredMove { mv, score, is_capture, gives_check }
+        })
+        .collect();
+
+    scored_moves.sort_unstable_by_key(|sm| -sm.score);
 
     let mut best_score = -INFINITY;
     let mut best_move = None;
-    let mut pv = vec![];
+    let mut best_pv = vec![];
     let mut move_count = 0;
     let mut quiets_tried = Vec::new();
 
-    for mv in moves {
-        let is_capture = board.piece_on(mv.get_dest()).is_some() ||
-                        (board.piece_on(mv.get_source()) == Some(chess::Piece::Pawn) &&
-                         mv.get_source().get_file() != mv.get_dest().get_file() &&
-                         board.piece_on(mv.get_dest()).is_none());
-        
-        let new_board = board.make_move_new(mv);
-        let gives_check = new_board.checkers() != &EMPTY;
-
-        if !is_pv_node && !in_check && !gives_check && !is_capture && mv.get_promotion().is_none() 
-            && depth <= 3 && move_count > 0 {
-            let futility_margin = 250 * depth;
-            if static_eval + futility_margin <= alpha {
-                state.futility_prunes += 1;
-                continue;
-            }
-        }
+    for scored in scored_moves {
+        let mv = scored.mv;
+        let is_capture = scored.is_capture;
+        let gives_check = scored.gives_check;
         
         if !is_pv_node && !in_check && depth <= 8 && move_count >= 3 && !is_capture && !gives_check {
             if move_count >= 3 + depth as usize * 2 {
@@ -375,13 +382,13 @@ fn negamax(
             }
         }
 
+        let new_board = board.make_move_new(mv);
         let mut new_eval = *eval_state;
         new_eval.apply_move(board, mv, board.side_to_move());
 
-        let score = if move_count == 0 {
-            let (s, sub_pv) = negamax(&new_board, &mut new_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state, Some(mv));
-            pv = sub_pv;
-            -s
+        let (score, sub_pv) = if move_count == 0 {
+            let (s, pv) = negamax(&new_board, &mut new_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state, Some(mv));
+            (-s, pv)
         } else {
             let mut reduction: i32 = 0;
             if !in_check && !gives_check && !is_capture && mv.get_promotion().is_none() && move_count >= 3 && depth >= 3 {
@@ -395,7 +402,6 @@ fn negamax(
                     reduction += 1;
                 }
                 
-                // Don't reduce killer moves or counter moves as much
                 if ply_from_root < MAX_DEPTH {
                     if Some(mv) == state.killer_moves[ply_from_root][0] || 
                        Some(mv) == state.killer_moves[ply_from_root][1] {
@@ -418,30 +424,29 @@ fn negamax(
                 }
             }
 
-            let (s, mut sub_pv) = negamax(&new_board, &mut new_eval, depth - 1 - reduction, -alpha - 1, -alpha, ply_from_root + 1, state, Some(mv));
+            let (s, mut pv) = negamax(&new_board, &mut new_eval, depth - 1 - reduction, -alpha - 1, -alpha, ply_from_root + 1, state, Some(mv));
             let mut score = -s;
 
             if score > alpha {
                 if reduction > 0 {
                     let mut research_eval = *eval_state;
                     research_eval.apply_move(board, mv, board.side_to_move());
-                    let (s2, sub_pv2) = negamax(&new_board, &mut research_eval, depth - 1, -alpha - 1, -alpha, ply_from_root + 1, state, Some(mv));
+                    let (s2, pv2) = negamax(&new_board, &mut research_eval, depth - 1, -alpha - 1, -alpha, ply_from_root + 1, state, Some(mv));
                     score = -s2;
-                    sub_pv = sub_pv2;
+                    pv = pv2;
                 }
 
                 if alpha < score && score < beta {
                     state.pvs_research += 1;
                     let mut pvs_eval = *eval_state;
                     pvs_eval.apply_move(board, mv, board.side_to_move());
-                    let (s3, sub_pv3) = negamax(&new_board, &mut pvs_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state, Some(mv));
+                    let (s3, pv3) = negamax(&new_board, &mut pvs_eval, depth - 1, -beta, -alpha, ply_from_root + 1, state, Some(mv));
                     score = -s3;
-                    sub_pv = sub_pv3;
+                    pv = pv3;
                 }
             }
 
-            pv = sub_pv;
-            score
+            (score, pv)
         };
 
         move_count += 1;
@@ -453,9 +458,9 @@ fn negamax(
         if score > best_score {
             best_score = score;
             best_move = Some(mv);
-            let mut new_pv = vec![mv];
-            new_pv.extend(pv.clone());
-            pv = new_pv;
+            
+            best_pv = vec![mv];
+            best_pv.extend(sub_pv);
 
             if score > alpha {
                 alpha = score;
@@ -483,7 +488,7 @@ fn negamax(
                     }
 
                     state.tt.store(board, depth, beta, TTFlag::LowerBound, best_move, ply_from_root as i32);
-                    return (beta, pv);
+                    return (beta, best_pv);
                 }
             }
         }
@@ -503,7 +508,7 @@ fn negamax(
     };
 
     state.tt.store(board, depth, best_score, flag, best_move, ply_from_root as i32);
-    (best_score, pv)
+    (best_score, best_pv)
 }
 
 pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, state: &mut SearchState) -> (Option<ChessMove>, Vec<(ChessMove, i32)>) {
@@ -564,6 +569,7 @@ pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, s
         loop {
             let mut current_moves = moves.clone();
             
+            // FIXED: Just check if PV exists in move list, no expensive validation
             if let Some(pv) = pv_move {
                 if let Some(pos) = current_moves.iter().position(|&m| m == pv) {
                     current_moves.remove(pos);
@@ -600,11 +606,11 @@ pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, s
                 root_scores.push((mv, score));
             }
 
-            if !state.stop_search && current_depth >= 4 && (current_best_score <= search_alpha || current_best_score >= search_beta) {
+            if !state.stop_search && current_depth >= 4 && 
+            (current_best_score <= search_alpha || current_best_score >= search_beta) {
                 window *= 2;
                 search_alpha = current_best_score - window;
                 search_beta = current_best_score + window;
-                root_scores.clear();
                 continue;
             }
 
