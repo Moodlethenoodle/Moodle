@@ -2,9 +2,8 @@ use chess::{Board, ChessMove, MoveGen, EMPTY};
 use std::time::Instant;
 
 use crate::evaluation::{evaluate_board_incremental, EvalState};
-use crate::helpers::{move_score, HistoryHeuristic, MAX_DEPTH};
+use crate::helpers::{move_score, HistoryHeuristic, MAX_DEPTH, mvv_lva_score};
 use crate::tt::{TranspositionTable, TTFlag};
-use crate::movegen::{QuiescenceMoveGen};
 
 const MATE_SCORE: i32 = 100000;
 const INFINITY: i32 = 1000000;
@@ -129,37 +128,115 @@ impl SearchState {
 fn quiescence(board: &Board, eval_state: &mut EvalState, mut alpha: i32, beta: i32, ply_from_root: i32, state: &mut SearchState) -> i32 {
     state.nodes_searched += 1;
     
-    let stand_pat = evaluate_board_incremental(board, eval_state, ply_from_root);
+    let in_check = board.checkers() != &EMPTY;
     
-    if stand_pat >= beta {
-        return beta;
+    // Stand pat only valid when not in check
+    if !in_check {
+        let stand_pat = evaluate_board_incremental(board, eval_state, ply_from_root);
+        
+        if stand_pat >= beta {
+            return beta;
+        }
+        
+        if alpha < stand_pat {
+            alpha = stand_pat;
+        }
     }
     
-    if ply_from_root >= 20 {
-        return stand_pat;
+    // Emergency depth limit only - much higher than before
+    if ply_from_root >= 64 {
+        return evaluate_board_incremental(board, eval_state, ply_from_root);
     }
     
-    const BIG_DELTA: i32 = 900;
-    if stand_pat + BIG_DELTA < alpha {
+    // When in check, we must search ALL legal moves (not just captures)
+    if in_check {
+        let mut move_gen = MoveGen::new_legal(board);
+        let moves: Vec<ChessMove> = move_gen.collect();
+        
+        // Checkmate detection
+        if moves.is_empty() {
+            return -MATE_SCORE + ply_from_root;
+        }
+        
+        for mv in moves {
+            let new_board = board.make_move_new(mv);
+            let mut new_eval = *eval_state;
+            new_eval.apply_move(board, mv, board.side_to_move());
+            
+            let score = -quiescence(&new_board, &mut new_eval, -beta, -alpha, ply_from_root + 1, state);
+            
+            if score >= beta {
+                return beta;
+            }
+            if score > alpha {
+                alpha = score;
+            }
+        }
+        
         return alpha;
     }
     
-    if alpha < stand_pat {
-        alpha = stand_pat;
-    }
-
-    let mut move_gen = QuiescenceMoveGen::new(board);
+    // Not in check - search captures and checks
+    let stand_pat = evaluate_board_incremental(board, eval_state, ply_from_root);
     
-    while let Some(mv) = move_gen.next() {
-        if let Some(captured) = board.piece_on(mv.get_dest()) {
-            let capture_value = crate::evaluation::piece_value(captured);
-            if stand_pat + capture_value + 200 < alpha {
-                continue;
+    // More conservative delta pruning - only in non-tactical positions
+    const BIG_DELTA: i32 = 1500;  // Increased from 900
+    if stand_pat + BIG_DELTA < alpha && ply_from_root > 2 {
+        return alpha;
+    }
+    
+    let mut move_gen = MoveGen::new_legal(board);
+    let mut moves: Vec<(ChessMove, i32, bool)> = Vec::with_capacity(32);
+    
+    for mv in move_gen {
+        let dest_piece = board.piece_on(mv.get_dest());
+        let source_piece = board.piece_on(mv.get_source());
+        
+        let is_capture = dest_piece.is_some() ||
+            (source_piece == Some(chess::Piece::Pawn) &&
+             mv.get_source().get_file() != mv.get_dest().get_file() &&
+             dest_piece.is_none());
+        
+        // Check if move gives check (only in first 2 plies to avoid explosion)
+        let gives_check = if ply_from_root < 2 {
+            let new_board = board.make_move_new(mv);
+            new_board.checkers() != &EMPTY
+        } else {
+            false
+        };
+        
+        if is_capture || gives_check || mv.get_promotion().is_some() {
+            let score = if is_capture {
+                mvv_lva_score(board, mv)
+            } else if gives_check {
+                100000  // Checks are interesting
+            } else if mv.get_promotion().is_some() {
+                200000  // Promotions very interesting
+            } else {
+                0
+            };
+            
+            moves.push((mv, score, is_capture));
+        }
+    }
+    
+    // Sort moves by score
+    moves.sort_unstable_by_key(|(_, score, _)| -score);
+    
+    for (mv, _, is_capture) in moves {
+        // Much less aggressive futility pruning
+        if is_capture {
+            if let Some(captured) = board.piece_on(mv.get_dest()) {
+                let capture_value = crate::evaluation::piece_value(captured);
+                
+                // Only prune clearly bad captures deep in the tree
+                if ply_from_root > 4 && stand_pat + capture_value + 400 < alpha {
+                    continue;
+                }
             }
         }
         
         let new_board = board.make_move_new(mv);
-        
         let mut new_eval = *eval_state;
         new_eval.apply_move(board, mv, board.side_to_move());
         

@@ -221,7 +221,7 @@ impl EvalState {
         // Track what changed for positional updates
         let mut pawn_changed = piece == Piece::Pawn;
         let mut rook_changed = piece == Piece::Rook;
-        let mut king_changed = piece == Piece::King;
+        let king_changed = piece == Piece::King;
         
         // Handle captures
         if let Some(captured) = board.piece_on(to) {
