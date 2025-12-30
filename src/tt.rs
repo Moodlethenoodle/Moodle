@@ -14,22 +14,24 @@ pub struct TTEntry {
     pub score: i32,
     pub flag: TTFlag,
     pub best_move: Option<ChessMove>,
+    pub age: u8,
 }
 
 pub struct TranspositionTable {
     pub table: Vec<Option<TTEntry>>,
     pub size: usize,
-    pub mask: usize,  // OPTIMIZED: Added mask for bitwise AND
+    pub mask: usize,
     pub hits: u64,
     pub misses: u64,
+    pub generation: u8,
+    pub filled_count: usize,
 }
 
 impl TranspositionTable {
     pub fn new(size_mb: usize) -> Self {
-        let bytes_per_entry = 40;
+        let bytes_per_entry = std::mem::size_of::<Option<TTEntry>>();
         let entries = (size_mb * 1024 * 1024) / bytes_per_entry;
         
-        // OPTIMIZED: Round to nearest power of 2 for bitwise indexing
         let size = if entries.is_power_of_two() {
             entries
         } else {
@@ -39,23 +41,32 @@ impl TranspositionTable {
         Self {
             table: vec![None; size],
             size,
-            mask: size - 1,  // OPTIMIZED: Pre-compute mask for fast indexing
+            mask: size - 1,
             hits: 0,
             misses: 0,
+            generation: 0,
+            filled_count: 0,
         }
     }
 
-    // OPTIMIZED: Use bitwise AND instead of modulo
     #[inline]
     fn index(&self, zobrist: u64) -> usize {
         (zobrist as usize) & self.mask
+    }
+
+    pub fn new_search(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    #[inline]
+    fn is_over_capacity(&self) -> bool {
+        (self.filled_count * 100) / self.size > 95
     }
 
     pub fn store(&mut self, board: &Board, depth: i32, score: i32, flag: TTFlag, best_move: Option<ChessMove>, ply: i32) {
         let zobrist = board.get_hash();
         let idx = self.index(zobrist);
         
-        // Adjust mate scores to be relative to root
         let adjusted_score = if score > 90000 {
             score + ply
         } else if score < -90000 {
@@ -64,19 +75,40 @@ impl TranspositionTable {
             score
         };
         
+        let is_over_capacity = self.is_over_capacity();
+        
         let should_replace = match &self.table[idx] {
             None => true,
-            Some(entry) => entry.zobrist == zobrist || entry.depth <= depth,
+            Some(entry) => {
+                if entry.zobrist == zobrist {
+                    true
+                } else {
+                    let age_diff = self.generation.wrapping_sub(entry.age);
+                    
+                    if is_over_capacity {
+                        age_diff >= 5 || depth > entry.depth
+                    } else {
+                        age_diff >= 10 || depth >= entry.depth
+                    }
+                }
+            }
         };
 
         if should_replace {
+            let was_empty = self.table[idx].is_none();
+            
             self.table[idx] = Some(TTEntry {
                 zobrist,
                 depth,
                 score: adjusted_score,
                 flag,
                 best_move,
+                age: self.generation,
             });
+            
+            if was_empty {
+                self.filled_count += 1;
+            }
         }
     }
 
@@ -100,7 +132,6 @@ impl TranspositionTable {
                 if entry.depth >= depth {
                     self.hits += 1;
                     
-                    // Adjust mate scores from root-relative to current ply
                     let adjusted_score = if entry.score > 90000 {
                         entry.score - ply
                     } else if entry.score < -90000 {
@@ -130,6 +161,7 @@ impl TranspositionTable {
         self.table = vec![None; self.size];
         self.hits = 0;
         self.misses = 0;
+        self.filled_count = 0;
     }
 
     pub fn get_stats(&self) -> (u64, u64, f64) {

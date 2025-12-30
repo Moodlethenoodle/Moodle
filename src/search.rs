@@ -27,7 +27,7 @@ pub struct SearchState {
 impl SearchState {
     pub fn new() -> Self {
         Self {
-            tt: TranspositionTable::new(256),
+            tt: TranspositionTable::new(2048),
             history: HistoryHeuristic::new(),
             killer_moves: [[None; 2]; MAX_DEPTH],
             counter_moves: [[None; 64]; 64],
@@ -144,7 +144,7 @@ fn quiescence(board: &Board, eval_state: &mut EvalState, mut alpha: i32, beta: i
     }
     
     // Emergency depth limit only - much higher than before
-    if ply_from_root >= 64 {
+    if ply_from_root >= 256 {
         return evaluate_board_incremental(board, eval_state, ply_from_root);
     }
     
@@ -176,11 +176,9 @@ fn quiescence(board: &Board, eval_state: &mut EvalState, mut alpha: i32, beta: i
         return alpha;
     }
     
-    // Not in check - search captures and checks
     let stand_pat = evaluate_board_incremental(board, eval_state, ply_from_root);
     
-    // More conservative delta pruning - only in non-tactical positions
-    const BIG_DELTA: i32 = 1500;  // Increased from 900
+    const BIG_DELTA: i32 = 1500;
     if stand_pat + BIG_DELTA < alpha && ply_from_root > 2 {
         return alpha;
     }
@@ -197,8 +195,7 @@ fn quiescence(board: &Board, eval_state: &mut EvalState, mut alpha: i32, beta: i
              mv.get_source().get_file() != mv.get_dest().get_file() &&
              dest_piece.is_none());
         
-        // Check if move gives check (only in first 2 plies to avoid explosion)
-        let gives_check = if ply_from_root < 2 {
+        let gives_check = if ply_from_root < 3 {
             let new_board = board.make_move_new(mv);
             new_board.checkers() != &EMPTY
         } else {
@@ -513,6 +510,7 @@ fn negamax(
 
 pub fn pick_move_timed(board: &Board, max_depth: i32, time_limit: Option<f64>, state: &mut SearchState) -> (Option<ChessMove>, Vec<(ChessMove, i32)>) {
     state.clear_for_search();
+    state.tt.new_search();
 
     let start_time = Instant::now();
     let time_for_move = time_limit.unwrap_or(999999.0);
