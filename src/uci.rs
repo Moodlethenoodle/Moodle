@@ -53,19 +53,30 @@ pub fn run() {
             }
             "position" => {
                 state.position_history.clear();
+                state.halfmove_clock = 0;  // NEW: Reset halfmove clock
 
                 if parts[1] == "startpos" {
                     board = Board::default();
-                    // DON'T add the starting position yet
                     
                     if let Some(moves_pos) = parts.iter().position(|&p| p == "moves") {
                         for move_str in &parts[moves_pos + 1..] {
-                            // Add position BEFORE making the move
                             state.position_history.push(board.get_hash());
                             
                             if let Ok(mv) = ChessMove::from_san(&board, move_str) {
+                                // NEW: Update halfmove clock
+                                if state.is_irreversible(&board, mv) {
+                                    state.halfmove_clock = 0;
+                                } else {
+                                    state.halfmove_clock += 1;
+                                }
                                 board = board.make_move_new(mv);
                             } else if let Ok(mv) = ChessMove::from_str(move_str) {
+                                // NEW: Update halfmove clock
+                                if state.is_irreversible(&board, mv) {
+                                    state.halfmove_clock = 0;
+                                } else {
+                                    state.halfmove_clock += 1;
+                                }
                                 board = board.make_move_new(mv);
                             }
                         }
@@ -77,24 +88,40 @@ pub fn run() {
                     
                     if let Ok(new_board) = Board::from_str(&fen_str) {
                         board = new_board;
-                        // DON'T add the FEN position yet
+                        
+                        // NEW: Parse halfmove clock from FEN if present
+                        let fen_parts: Vec<&str> = fen_str.split_whitespace().collect();
+                        if fen_parts.len() >= 5 {
+                            if let Ok(halfmove) = fen_parts[4].parse::<u32>() {
+                                state.halfmove_clock = halfmove;
+                            }
+                        }
                         
                         if let Some(moves_pos) = moves_pos {
                             for move_str in &parts[moves_pos + 1..] {
-                                // Add position BEFORE making the move
                                 state.position_history.push(board.get_hash());
                                 
                                 if let Ok(mv) = ChessMove::from_san(&board, move_str) {
+                                    // NEW: Update halfmove clock
+                                    if state.is_irreversible(&board, mv) {
+                                        state.halfmove_clock = 0;
+                                    } else {
+                                        state.halfmove_clock += 1;
+                                    }
                                     board = board.make_move_new(mv);
                                 } else if let Ok(mv) = ChessMove::from_str(move_str) {
+                                    // NEW: Update halfmove clock
+                                    if state.is_irreversible(&board, mv) {
+                                        state.halfmove_clock = 0;
+                                    } else {
+                                        state.halfmove_clock += 1;
+                                    }
                                     board = board.make_move_new(mv);
                                 }
                             }
                         }
                     }
                 }
-                // Now position_history contains all positions before the current one
-                // No need to pop anything!
             }
             "go" => {
                 let mut movetime = None;
